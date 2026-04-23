@@ -1,0 +1,25 @@
+import User from '../models/user.model.js';
+
+export async function getUserByEmail(email) {
+  return User.findOne({
+    where: {
+      email
+    }
+  });
+}
+
+export async function createUser(data) {
+  return User.create(data);
+}
+
+export async function getUserById(id) {
+    return User.findOne({
+        where:{
+            id,
+        }
+    })
+}
+
+export async function getAllUsers(){
+  return User.findAll();
+}
