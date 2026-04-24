@@ -23,3 +23,17 @@ export async function getUserById(id) {
 export async function getAllUsers(){
   return User.findAll();
 }
+
+export async function updateUserProfile(id, data) {
+  const user = await User.findOne({
+    where: { id },
+  });
+
+  if (!user) {
+    return null;
+  }
+
+  await user.update(data);
+
+  return user;
+}

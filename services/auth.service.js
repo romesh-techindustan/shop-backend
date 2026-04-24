@@ -2,6 +2,7 @@ import bcrypt from 'bcrypt';
 import { UniqueConstraintError } from 'sequelize';
 import { AppError } from '../middleware/error-response.js';
 import { createUser, getUserByEmail } from '../repositories/user.repository.js';
+import jwt from 'jsonwebtoken'
 
 const SALT_ROUNDS = 10;
 
@@ -44,10 +45,18 @@ export async function login(data) {
     throw new AppError('User does not exists', 404);
   }
 
-  const validPassword = bcrypt.compare(data.password, existingUser.password);
+  const validPassword = await bcrypt.compare(data.password, existingUser.password);
   if (!validPassword){
     throw new AppError('Invalid credentials', 401);
   }
 
-  return existingUser;
+  const jwtSecret = process.env.JWT_SECRET || 'JWT_SECRET';
+
+  const accessToken = jwt.sign(
+    { id: existingUser.id, name: existingUser.name, email: existingUser.email },
+    jwtSecret,
+    { expiresIn: '7d' }
+  );
+
+  return {existingUser, accessToken};
 }

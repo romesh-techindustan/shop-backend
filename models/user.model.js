@@ -5,8 +5,8 @@ const User = sequelize.define(
   'User',
   {
     id: {
-      type: DataTypes.INTEGER,
-      autoIncrement: true,
+      type: DataTypes.UUID,
+      defaultValue: DataTypes.UUIDV4,
       primaryKey: true
     },
     name: {
@@ -31,6 +31,7 @@ const User = sequelize.define(
   },
   {
     tableName: 'users',
+    timestamps: true,
     underscored: true
   }
 );

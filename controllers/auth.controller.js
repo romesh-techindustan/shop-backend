@@ -9,8 +9,8 @@ export const signupController = async (req, res) => {
 };
 
 export const login = async (req, res) => {
-  const user = await authService.login(req.validatedData);
-  const response = userResponse(user);
+  const {existingUser, accessToken} = await authService.login(req.validatedData);
+  const response = userResponse(existingUser);
 
-  res.success(response, 'User created successfully', 201);
+  res.success(response, 'Login successfully', 200, { accessToken });
 };
