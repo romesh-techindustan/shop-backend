@@ -1,5 +1,6 @@
 import { Op } from 'sequelize';
 import { AppError } from '../middleware/error-response.js';
+import sequelize from '../config/database.js';
 import Product from '../models/product.model.js';
 
 export async function createProduct(data) {
@@ -77,4 +78,47 @@ export async function getProductsByCategory(category) {
     },
     order: [['createdAt', 'DESC']],
   });
+}
+
+export async function reserveProductStock(productId, quantity, options = {}) {
+  const [affectedCount] = await Product.update(
+    {
+      stock: sequelize.literal(`stock - ${Number(quantity)}`),
+    },
+    {
+      where: {
+        id: productId,
+        stock: {
+          [Op.gte]: quantity,
+        },
+      },
+      transaction: options.transaction,
+    }
+  );
+
+  return affectedCount > 0;
+}
+
+export async function restoreProductStock(productId, quantity, options = {}) {
+  return Product.increment('stock', {
+    by: quantity,
+    where: {
+      id: productId,
+    },
+    transaction: options.transaction,
+  });
+}
+
+export async function getUniqueCategories() {
+  const categories = await Product.findAll({
+    attributes: ['category'],
+    where: {
+      isActive: true,
+    },
+    group: ['category'],
+    order: [['category', 'ASC']],
+    raw: true,
+  });
+
+  return categories.map((item) => item.category);
 }

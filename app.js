@@ -2,9 +2,12 @@ import express from 'express';
 import userRoute from './routes/users.route.js';
 import authRoute from './routes/auth.route.js';
 import cartRoute from './routes/cart.route.js';
+import orderRoute from './routes/order.route.js';
 import productRoute from './routes/product.route.js';
+import * as orderController from './controllers/order.controller.js';
 import successResponse from './middleware/success-response.js';
 import errorResponse from './middleware/error-response.js';
+import asyncHandler from './middleware/async-handler.js';
 import sequelize from './config/database.js';
 import cors from "cors";
 import dotenv from 'dotenv';
@@ -20,13 +23,21 @@ app.use(cors({
   credentials: true,
 }));
 
+app.post(
+  '/webhooks/stripe',
+  express.raw({ type: 'application/json' }),
+  asyncHandler(orderController.stripeWebhook)
+);
+
 app.use(express.json());
 app.use(successResponse);
+app.use('/uploads', express.static('uploads'));
 
 app.use('/users', userRoute);
 app.use('/auth', authRoute);
 app.use('/products', productRoute);
 app.use('/cart', cartRoute);
+app.use('/orders', orderRoute);
 
 app.get('/', (req, res) => {
   res.send('Hello World!');
@@ -38,8 +49,7 @@ async function startServer() {
   try {
     await sequelize.authenticate();
 
-    // await sequelize.sync();
-    await sequelize.sync({ alter: true }); // use only in development if model changes need DB update
+    await sequelize.sync();
 
     app.listen(port, () => {
       console.log(`Server is running on port ${port}`);

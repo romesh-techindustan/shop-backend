@@ -72,3 +72,8 @@ export async function getProductById(id) {
 
   return productResponse(product);
 }
+
+
+export async function getUniqueCategories(){
+  return await productRepository.getUniqueCategories();
+}
