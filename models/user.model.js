@@ -27,6 +27,27 @@ const User = sequelize.define(
     password: {
       type: DataTypes.STRING,
       allowNull: false
+    },
+    isAdmin: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: false
+    },
+    resetPasswordToken: {
+      type: DataTypes.STRING,
+      allowNull: true
+    },
+    resetPasswordExpiresAt: {
+      type: DataTypes.DATE,
+      allowNull: true
+    },
+    twoFactorOtpToken: {
+      type: DataTypes.STRING,
+      allowNull: true
+    },
+    twoFactorOtpExpiresAt: {
+      type: DataTypes.DATE,
+      allowNull: true
     }
   },
   {

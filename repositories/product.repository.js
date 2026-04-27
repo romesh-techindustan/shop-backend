@@ -78,3 +78,22 @@ export async function getProductsByCategory(category) {
     order: [['createdAt', 'DESC']],
   });
 }
+
+export async function getDistinctCategories() {
+  const rows = await Product.findAll({
+    attributes: ['category'],
+    group: ['category'],
+    raw: true,
+    order: [['category', 'ASC']],
+  });
+
+  const distinctCategories = rows
+    .map((row) => row.category)
+    .filter(Boolean);
+
+  if (distinctCategories.length > 0) {
+    return distinctCategories;
+  }
+
+  return Product.rawAttributes.category.values ?? [];
+}

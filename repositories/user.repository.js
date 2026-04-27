@@ -37,3 +37,9 @@ export async function updateUserProfile(id, data) {
 
   return user;
 }
+
+export async function updateUser(user, data) {
+  await user.update(data);
+
+  return user;
+}

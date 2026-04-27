@@ -28,6 +28,8 @@ export function productResponse(productModel) {
     size: product.size,
     price: toMoneyNumber(product.price),
     stock: Number(product.stock ?? 0),
+    averageRating: Number(Number(product.averageRating ?? 0).toFixed(1)),
+    ratingCount: Number(product.ratingCount ?? 0),
     isActive: product.isActive !== false,
     createdAt: product.createdAt,
     updatedAt: product.updatedAt,

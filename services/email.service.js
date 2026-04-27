@@ -1,0 +1,99 @@
+import nodemailer from "nodemailer";
+import dotenv from 'dotenv';
+
+dotenv.config();
+
+function getMailConfig() {
+  return {
+    host: process.env.SMTP_HOST || "smtp.gmail.com",
+    port: Number(process.env.SMTP_PORT || 465),
+    secure: String(process.env.SMTP_SECURE ?? "true") === "true",
+    pass: process.env.SMTP_PASS,
+    from: process.env.SMTP_FROM,
+  };
+}
+
+function createTransporter() {
+  const config = getMailConfig();
+
+  if (!config.pass || !config.from) {
+    throw new Error(
+      "SMTP is not configured. Set SMTP_USER and SMTP_PASS, or GMAIL_USER and GMAIL_APP_PASSWORD."
+    );
+  }
+
+  return nodemailer.createTransport({
+  host: 'smtp.gmail.com',
+  port: 465,
+  secure: true,
+  auth: {
+    user: config.from,
+    pass: config.pass
+  }
+  });
+}
+
+export async function sendMail({ to, subject, text, html }) {
+  const transporter = createTransporter();
+  const config = getMailConfig();
+
+  return transporter.sendMail({
+    from: config.from,
+    to,
+    subject,
+    text,
+    html,
+  });
+}
+
+export async function sendWelcomeEmail(user) {
+  return sendMail({
+    to: user.email,
+    subject: "Welcome to Exclusive",
+    text: `Hi ${user.name}, welcome to Exclusive. Your account is ready.`,
+    html: `
+      <div style="font-family: Arial, sans-serif; line-height: 1.5;">
+        <h2>Welcome to Exclusive, ${user.name}!</h2>
+        <p>Your account is ready. You can now browse products, manage your cart, and place orders.</p>
+      </div>
+    `,
+  });
+}
+
+export async function sendPasswordResetEmail(user, resetUrl) {
+  return sendMail({
+    to: user.email,
+    subject: "Reset your Exclusive password",
+    text: `Hi ${user.name}, reset your password using this link: ${resetUrl}. This link expires in 15 minutes.`,
+    html: `
+      <div style="font-family: Arial, sans-serif; line-height: 1.5;">
+        <h2>Reset your password</h2>
+        <p>Hi ${user.name}, use the button below to reset your password. This link expires in 15 minutes.</p>
+        <p>
+          <a href="${resetUrl}" style="display:inline-block;background:#db4444;color:#ffffff;padding:12px 18px;text-decoration:none;border-radius:6px;">
+            Reset Password
+          </a>
+        </p>
+        <p>If the button does not work, copy this URL into your browser:</p>
+        <p>${resetUrl}</p>
+      </div>
+    `,
+  });
+}
+
+export async function sendAdminLoginOtpEmail(user, otp, expiresInMinutes) {
+  return sendMail({
+    to: user.email,
+    subject: "Your Exclusive admin login OTP",
+    text: `Hi ${user.name}, your admin login OTP is ${otp}. It expires in ${expiresInMinutes} minutes.`,
+    html: `
+      <div style="font-family: Arial, sans-serif; line-height: 1.5;">
+        <h2>Admin login verification</h2>
+        <p>Hi ${user.name}, use this OTP to finish signing in to your admin account.</p>
+        <p style="font-size: 24px; font-weight: bold; letter-spacing: 4px;">${otp}</p>
+        <p>This code expires in ${expiresInMinutes} minutes.</p>
+        <p>If you did not try to sign in, you can ignore this email.</p>
+      </div>
+    `,
+  });
+}

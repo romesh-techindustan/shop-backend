@@ -1,5 +1,7 @@
 import { productResponse } from '../dto/product-response.dto.js';
+import { AppError } from '../middleware/error-response.js';
 import * as productRepository from '../repositories/product.repository.js';
+import { getRatingSummariesByProductIds } from '../repositories/rating.repository.js';
 
 const DEFAULT_PAGE = 1;
 const DEFAULT_LIMIT = 12;
@@ -37,6 +39,21 @@ function parseBoolean(value, fallback) {
   return fallback;
 }
 
+function mergeProductRatingSummary(product, ratingSummaries) {
+  const plainProduct =
+    product && typeof product.get === 'function'
+      ? product.get({ plain: true })
+      : product;
+
+  return {
+    ...plainProduct,
+    ...(ratingSummaries.get(plainProduct.id) ?? {
+      averageRating: 0,
+      ratingCount: 0,
+    }),
+  };
+}
+
 export async function getProducts(query = {}) {
   const page = parsePositiveInteger(query.page, DEFAULT_PAGE);
   const limit = Math.min(
@@ -56,8 +73,14 @@ export async function getProducts(query = {}) {
     isActive: parseBoolean(query.isActive, true),
   });
 
+  const ratingSummaries = await getRatingSummariesByProductIds(
+    rows.map((product) => product.id)
+  );
+
   return {
-    items: rows.map(productResponse),
+    items: rows.map((product) =>
+      productResponse(mergeProductRatingSummary(product, ratingSummaries))
+    ),
     pagination: {
       page,
       limit,
@@ -69,6 +92,26 @@ export async function getProducts(query = {}) {
 
 export async function getProductById(id) {
   const product = await productRepository.getProductById(id);
+  const ratingSummaries = await getRatingSummariesByProductIds([product.id]);
 
-  return productResponse(product);
+  return productResponse(mergeProductRatingSummary(product, ratingSummaries));
+}
+
+export async function getCategories() {
+  return productRepository.getDistinctCategories();
+}
+
+export async function getProductsByCategory(category){
+  if (category.trim()===""){
+    throw new AppError('Please provide a valid category', 400)
+  }
+
+  const products = await productRepository.getProductsByCategory(category);
+  const ratingSummaries = await getRatingSummariesByProductIds(
+    products.map((product) => product.id)
+  );
+
+  return products.map((product) =>
+    productResponse(mergeProductRatingSummary(product, ratingSummaries))
+  );
 }
