@@ -1,103 +1,412 @@
-import sequelize from '../config/database.js';
-import { orderResponse } from '../dto/order-response.dto.js';
-import { AppError } from '../middleware/error-response.js';
-import * as cartRepository from '../repositories/cart.repository.js';
-import * as orderRepository from '../repositories/order.repository.js';
-import * as productRepository from '../repositories/product.repository.js';
-import * as stripeService from './stripe.service.js';
+import sequelize from "../config/database.js";
+import { cartResponse } from "../dto/cart-response.dto.js";
+import { orderResponse } from "../dto/order-response.dto.js";
+import { AppError } from "../middleware/error-response.js";
+import { CartItem, Product } from "../models/associations.js";
+import * as addressRepository from "../repositories/address.repository.js";
+import * as cartRepository from "../repositories/cart.repository.js";
+import * as orderRepository from "../repositories/order.repository.js";
+import { createEmbeddedCheckoutSession, retrieveCheckoutSession } from "./stripe.service.js";
 
-function toCents(value) {
-  return Math.round(Number(value ?? 0) * 100);
+function toMoneyNumber(value) {
+  return Number(Number(value ?? 0).toFixed(2));
 }
 
-function fromCents(value) {
-  return Number((value / 100).toFixed(2));
-}
-
-function assertCartCanCheckout(cart) {
-  if (!cart || !cart.items || cart.items.length === 0) {
-    throw new AppError('Cart is empty', 400);
-  }
-}
-
-function assertProductAvailable(product) {
-  if (!product || product.isActive === false) {
-    throw new AppError('One or more cart products are no longer available', 400);
-  }
-}
-
-function buildOrderItems(cartItems) {
-  return cartItems.map((item) => {
-    const product = item.product;
-    const unitPriceCents = toCents(item.priceAtTime);
-    const quantity = Number(item.quantity);
-    const lineTotalCents = unitPriceCents * quantity;
-
-    return {
-      productId: item.productId,
-      productName: product.name,
-      productSku: product.sku,
-      productImage: product.image,
-      quantity,
-      unitPrice: fromCents(unitPriceCents),
-      lineTotal: fromCents(lineTotalCents),
-      selectedColor: item.selectedColor,
-      selectedSize: item.selectedSize,
-    };
-  });
-}
-
-function parsePositiveInteger(value, fallback) {
-  const parsedValue = Number.parseInt(value, 10);
-
-  if (Number.isNaN(parsedValue) || parsedValue < 1) {
-    return fallback;
-  }
-
-  return parsedValue;
-}
-
-function buildOrderTotals(items) {
-  const subtotalCents = items.reduce(
-    (sum, item) => sum + toCents(item.lineTotal),
-    0
-  );
-
+function normalizeAddress(data) {
   return {
-    subtotal: fromCents(subtotalCents),
-    totalAmount: fromCents(subtotalCents),
+    name: data.name,
+    phone: data.phone,
+    line1: data.line1,
+    line2: data.line2 || null,
+    city: data.city,
+    state: data.state,
+    postalCode: data.postalCode,
+    country: data.country.toUpperCase(),
   };
 }
 
-async function restoreReservedStock(order, transaction) {
-  await Promise.all(
-    (order.items ?? []).map((item) =>
-      productRepository.restoreProductStock(item.productId, item.quantity, {
-        transaction,
-      })
-    )
-  );
+function getLineTotal(unitPrice, quantity) {
+  return toMoneyNumber(toMoneyNumber(unitPrice) * Number(quantity ?? 0));
 }
 
-async function cancelReservedOrder(orderId, paymentStatus = 'cancelled') {
-  await sequelize.transaction(async (transaction) => {
-    const order = await orderRepository.findOrderById(orderId, { transaction });
+function calculateTotals(items) {
+  const subtotal = toMoneyNumber(
+    items.reduce((sum, item) => sum + getLineTotal(item.priceAtTime, item.quantity), 0)
+  );
 
-    if (!order || order.status !== 'pending') {
-      return;
+  return {
+    subtotal,
+    shippingAmount: 0,
+    taxAmount: 0,
+    discountAmount: 0,
+    totalAmount: subtotal,
+  };
+}
+
+function makeOrderNumber() {
+  const time = Date.now().toString(36).toUpperCase();
+  const suffix = Math.random().toString(36).slice(2, 7).toUpperCase();
+
+  return `ORD-${time}-${suffix}`;
+}
+
+function cartItemsToOrderItems(orderId, items) {
+  return items.map((item) => ({
+    orderId,
+    productId: item.productId,
+    productName: item.product.name,
+    productSku: item.product.sku,
+    productImage: item.product.image,
+    selectedColor: item.selectedColor,
+    selectedSize: item.selectedSize,
+    quantity: item.quantity,
+    unitPrice: item.priceAtTime,
+    lineTotal: getLineTotal(item.priceAtTime, item.quantity),
+  }));
+}
+
+async function getCartWithItems(userId, options = {}) {
+  const cart = await cartRepository.findCartByUserId(userId, options);
+
+  if (!cart || !cart.items?.length) {
+    throw new AppError("Your cart is empty", 400);
+  }
+
+  return cart;
+}
+
+async function resolveShippingAddress(userId, data, options = {}) {
+  let shippingAddress;
+
+  if (data.addressId) {
+    const address = await addressRepository.findAddressById(
+      userId,
+      data.addressId,
+      options
+    );
+
+    if (!address) {
+      throw new AppError("Address not found", 404);
     }
 
-    await restoreReservedStock(order, transaction);
+    shippingAddress = normalizeAddress(address.get({ plain: true }));
 
-    await orderRepository.updateOrder(
-      order,
+    return {
+      addressId: address.id,
+      shippingAddress,
+    };
+  } else {
+    shippingAddress = normalizeAddress(data.shippingAddress);
+  }
+
+  if (options.createAddress === false) {
+    return {
+      addressId: null,
+      shippingAddress,
+    };
+  }
+
+  const orderAddress = await addressRepository.createAddress(
+    userId,
+    {
+      ...shippingAddress,
+      isDefault: false,
+    },
+    options
+  );
+
+  return {
+    addressId: orderAddress.id,
+    shippingAddress,
+  };
+}
+
+function assertItemsCanCheckout(items) {
+  for (const item of items) {
+    const product = item.product;
+
+    if (!product || product.isActive === false) {
+      throw new AppError(`${item.product?.name || "A product"} is not available`, 400);
+    }
+
+    const stock = Number(product.stock ?? 0);
+
+    if (stock < item.quantity) {
+      throw new AppError(`Only ${stock} ${product.name} item(s) left in stock`, 400);
+    }
+  }
+}
+
+async function getOrderForUserOrFail(userId, orderId, options = {}) {
+  const order = await orderRepository.findOrderByIdForUser(userId, orderId, options);
+
+  if (!order) {
+    throw new AppError("Order not found", 404);
+  }
+
+  return order;
+}
+
+async function getOrderOrFail(orderId, options = {}) {
+  const order = await orderRepository.findOrderById(orderId, options);
+
+  if (!order) {
+    throw new AppError("Order not found", 404);
+  }
+
+  return order;
+}
+
+function getPaymentIntentId(paymentIntent) {
+  if (!paymentIntent) {
+    return null;
+  }
+
+  return typeof paymentIntent === "string" ? paymentIntent : paymentIntent.id;
+}
+
+function getOrderUpdateFromStripeSession(session, overridePaymentStatus = null) {
+  const paymentStatus =
+    overridePaymentStatus ||
+    (session.payment_status === "paid"
+      ? "paid"
+      : session.status === "expired"
+        ? "cancelled"
+        : "pending");
+
+  return {
+    paymentStatus,
+    ...(paymentStatus === "paid" && { status: "confirmed" }),
+    stripeCheckoutSessionId: session.id,
+    stripePaymentIntentId: getPaymentIntentId(session.payment_intent),
+  };
+}
+
+async function findOrderForStripeSession(session, options = {}) {
+  const orderId = session.metadata?.orderId || session.client_reference_id;
+
+  if (orderId) {
+    const order = await orderRepository.findOrderById(orderId, options);
+
+    if (order) {
+      return order;
+    }
+  }
+
+  return orderRepository.findOrderByStripeCheckoutSessionId(session.id, options);
+}
+
+export async function syncStripeCheckoutSession(session) {
+  const order = await sequelize.transaction(async (transaction) => {
+    const existingOrder = await findOrderForStripeSession(session, { transaction });
+
+    if (!existingOrder) {
+      return null;
+    }
+
+    return orderRepository.updateOrder(
+      existingOrder,
+      getOrderUpdateFromStripeSession(session),
+      { transaction }
+    );
+  });
+
+  return order ? orderResponse(order) : null;
+}
+
+export async function markStripeCheckoutSessionFailed(session) {
+  const order = await sequelize.transaction(async (transaction) => {
+    const existingOrder = await findOrderForStripeSession(session, { transaction });
+
+    if (!existingOrder) {
+      return null;
+    }
+
+    return orderRepository.updateOrder(
+      existingOrder,
+      getOrderUpdateFromStripeSession(session, "failed"),
+      { transaction }
+    );
+  });
+
+  return order ? orderResponse(order) : null;
+}
+
+export async function markStripePaymentIntentSucceeded(paymentIntent) {
+  const orderId = paymentIntent.metadata?.orderId;
+
+  if (!orderId) {
+    return null;
+  }
+
+  const order = await sequelize.transaction(async (transaction) => {
+    const existingOrder = await getOrderOrFail(orderId, { transaction });
+
+    return orderRepository.updateOrder(
+      existingOrder,
       {
-        status: 'cancelled',
-        paymentStatus,
+        status: "confirmed",
+        paymentStatus: "paid",
+        stripePaymentIntentId: paymentIntent.id,
       },
       { transaction }
     );
   });
+
+  return orderResponse(order);
+}
+
+export async function markStripePaymentIntentFailed(paymentIntent) {
+  const orderId = paymentIntent.metadata?.orderId;
+
+  if (!orderId) {
+    return null;
+  }
+
+  const order = await sequelize.transaction(async (transaction) => {
+    const existingOrder = await getOrderOrFail(orderId, { transaction });
+
+    return orderRepository.updateOrder(
+      existingOrder,
+      {
+        paymentStatus: "failed",
+        stripePaymentIntentId: paymentIntent.id,
+      },
+      { transaction }
+    );
+  });
+
+  return orderResponse(order);
+}
+
+export async function checkStripeCheckoutPayment(userId, sessionId) {
+  if (!sessionId) {
+    throw new AppError("Checkout session id is required", 400);
+  }
+
+  const session = await retrieveCheckoutSession(sessionId);
+  const order = await syncStripeCheckoutSession(session);
+
+  if (!order || order.userId !== userId) {
+    throw new AppError("Checkout session not found", 404);
+  }
+
+  return {
+    order,
+    paymentStatus: order.paymentStatus,
+    stripePaymentStatus: session.payment_status,
+    checkoutSessionStatus: session.status,
+  };
+}
+
+export async function getCurrentCheckout(userId) {
+  const cart = await getCartWithItems(userId);
+
+  return cartResponse(cart);
+}
+
+export async function previewOrder(userId, data) {
+  const cart = await getCartWithItems(userId);
+  await resolveShippingAddress(userId, data, { createAddress: false });
+  assertItemsCanCheckout(cart.items);
+
+  return {
+    ...calculateTotals(cart.items),
+    currency: data.currency,
+    items: cartResponse(cart).items,
+  };
+}
+
+export async function checkout(user, data) {
+  const userId = user.id;
+  const checkoutResult = await sequelize.transaction(async (transaction) => {
+    const cart = await getCartWithItems(userId, { transaction });
+    assertItemsCanCheckout(cart.items);
+
+    const { addressId, shippingAddress } = await resolveShippingAddress(
+      userId,
+      data,
+      { transaction }
+    );
+    const totals = calculateTotals(cart.items);
+
+    const order = await orderRepository.createOrder(
+      {
+        orderNumber: makeOrderNumber(),
+        userId,
+        addressId,
+        status: "pending",
+        paymentStatus: "pending",
+        paymentMethod: data.paymentMethod,
+        paymentProvider: data.paymentMethod,
+        currency: data.currency,
+        shippingAddress,
+        ...totals,
+      },
+      { transaction }
+    );
+
+    const orderItems = cartItemsToOrderItems(order.id, cart.items);
+
+    await orderRepository.createOrderItems(orderItems, { transaction });
+
+    let stripeSession = null;
+
+    if (data.paymentMethod === "stripe") {
+      stripeSession = await createEmbeddedCheckoutSession({
+        order: {
+          ...order.get({ plain: true }),
+          items: orderItems,
+        },
+        user,
+      });
+
+      await orderRepository.updateOrder(
+        order,
+        {
+          stripeCheckoutSessionId: stripeSession.id,
+          stripePaymentIntentId:
+            getPaymentIntentId(stripeSession.payment_intent),
+        },
+        { transaction }
+      );
+    }
+
+    for (const item of cart.items) {
+      await Product.decrement(
+        { stock: item.quantity },
+        {
+          where: { id: item.productId },
+          transaction,
+        }
+      );
+    }
+
+    await CartItem.destroy({
+      where: { cartId: cart.id },
+      transaction,
+    });
+
+    return {
+      orderId: order.id,
+      stripeCheckoutSessionId: stripeSession?.id ?? null,
+      stripeClientSecret: stripeSession?.client_secret ?? null,
+    };  
+  });
+
+  const order = await orderRepository.findOrderByIdForUser(userId, checkoutResult.orderId);
+  const response = orderResponse(order);
+
+  if (checkoutResult.stripeClientSecret) {
+    return {
+      ...response,
+      clientSecret: checkoutResult.stripeClientSecret,
+      stripeClientSecret: checkoutResult.stripeClientSecret,
+      stripeCheckoutSessionId: checkoutResult.stripeCheckoutSessionId,
+    };
+  }
+
+  return response;
 }
 
 export async function getOrders(userId) {
@@ -107,475 +416,86 @@ export async function getOrders(userId) {
 }
 
 export async function getOrderById(userId, orderId) {
-  const order = await orderRepository.findOrderByIdForUser(orderId, userId);
-
-  if (!order) {
-    throw new AppError('Order not found', 404);
-  }
-
-  return orderResponse(order);
-}
-
-export async function getCurrentCheckout(userId) {
-  const order = await orderRepository.findCurrentStripeCheckoutByUserId(userId);
-
-  if (!order) {
-    return null;
-  }
-
-  return orderResponse(order);
-}
-
-export async function previewOrder(userId, data = {}) {
-  const cart = await cartRepository.findCartByUserId(userId);
-  assertCartCanCheckout(cart);
-
-  const items = buildOrderItems(cart.items);
-  const totals = buildOrderTotals(items);
-
-  return {
-    paymentMethod: data.paymentProvider ?? 'stripe',
-    paymentProvider: data.paymentProvider ?? 'stripe',
-    currency: data.currency ?? 'usd',
-    subtotal: totals.subtotal,
-    totalAmount: totals.totalAmount,
-    items,
-  };
-}
-
-export async function getAdminOrders(query = {}) {
-  const page = parsePositiveInteger(query.page, 1);
-  const limit = Math.min(parsePositiveInteger(query.limit, 20), 100);
-  const { rows, count } = await orderRepository.findOrders({
-    page,
-    limit,
-    userId: query.userId,
-    status: query.status,
-    paymentProvider: query.paymentProvider ?? query.paymentMethod,
-    paymentStatus: query.paymentStatus,
-  });
-
-  return {
-    items: rows.map(orderResponse),
-    pagination: {
-      page,
-      limit,
-      totalItems: count,
-      totalPages: count === 0 ? 0 : Math.ceil(count / limit),
-    },
-  };
-}
-
-export async function createCheckout(user, data) {
-  const existingPendingOrder = await orderRepository.findPendingOrderByUserId(
-    user.id
-  );
-
-  if (existingPendingOrder) {
-    throw new AppError(
-      'You already have a pending order. Complete or cancel it before starting another checkout.',
-      409
-    );
-  }
-
-  const checkoutOrder = await sequelize.transaction(async (transaction) => {
-    const cart = await cartRepository.findCartByUserId(user.id, { transaction });
-    assertCartCanCheckout(cart);
-
-    const orderItems = buildOrderItems(cart.items);
-    const { subtotal, totalAmount } = buildOrderTotals(orderItems);
-
-    for (const item of cart.items) {
-      assertProductAvailable(item.product);
-
-      const reserved = await productRepository.reserveProductStock(
-        item.productId,
-        item.quantity,
-        { transaction }
-      );
-
-      if (!reserved) {
-        throw new AppError(
-          `${item.product.name} does not have enough stock for checkout`,
-          400
-        );
-      }
-    }
-
-    const order = await orderRepository.createOrder(
-      {
-        userId: user.id,
-        paymentProvider: data.paymentProvider,
-        subtotal,
-        totalAmount,
-        currency: data.currency,
-        shippingAddress: data.shippingAddress ?? null,
-      },
-      { transaction }
-    );
-
-    await orderRepository.bulkCreateOrderItems(
-      orderItems.map((item) => ({
-        ...item,
-        orderId: order.id,
-      })),
-      { transaction }
-    );
-
-    if (data.paymentProvider === 'cod') {
-      await cartRepository.clearCartItems(cart.id, { transaction });
-    }
-
-    return {
-      id: order.id,
-      totalAmount,
-      currency: order.currency,
-      paymentProvider: order.paymentProvider,
-    };
-  });
-
-  if (checkoutOrder.paymentProvider === 'cod') {
-    const order = await orderRepository.findOrderByIdForUser(
-      checkoutOrder.id,
-      user.id
-    );
-
-    return orderResponse(order);
-  }
-
-  let paymentIntent;
-
-  try {
-    paymentIntent = await stripeService.createPaymentIntent({
-      amount: toCents(checkoutOrder.totalAmount),
-      currency: checkoutOrder.currency,
-      orderId: checkoutOrder.id,
-      userId: user.id,
-      receiptEmail: user.email,
-    });
-
-    await sequelize.transaction(async (transaction) => {
-      const order = await orderRepository.findOrderById(checkoutOrder.id, {
-        transaction,
-      });
-
-      await orderRepository.updateOrder(
-        order,
-        {
-          stripePaymentIntentId: paymentIntent.id,
-          stripeClientSecret: paymentIntent.client_secret,
-        },
-        { transaction }
-      );
-    });
-
-    const order = await orderRepository.findOrderByIdForUser(
-      checkoutOrder.id,
-      user.id
-    );
-
-    return orderResponse(order);
-  } catch (error) {
-    if (paymentIntent?.id) {
-      try {
-        await stripeService.cancelPaymentIntent(paymentIntent.id);
-      } catch {
-        // Keep the original checkout error; webhook handling will reconcile later.
-      }
-    }
-
-    await cancelReservedOrder(checkoutOrder.id, 'failed');
-    throw error;
-  }
-}
-
-export async function retryPayment(user, orderId) {
-  const retryOrder = await sequelize.transaction(async (transaction) => {
-    const order = await orderRepository.findOrderByIdForUpdate(orderId, {
-      transaction,
-      lock: true,
-    });
-
-    if (!order || order.userId !== user.id) {
-      throw new AppError('Order not found', 404);
-    }
-
-    if (order.paymentProvider !== 'stripe') {
-      throw new AppError('Only Stripe orders can retry payment', 400);
-    }
-
-    if (!['failed', 'cancelled'].includes(order.paymentStatus)) {
-      throw new AppError('Only failed or cancelled payments can be retried', 400);
-    }
-
-    for (const item of order.items ?? []) {
-      assertProductAvailable(item.product);
-
-      const reserved = await productRepository.reserveProductStock(
-        item.productId,
-        item.quantity,
-        { transaction }
-      );
-
-      if (!reserved) {
-        throw new AppError(
-          `${item.productName} does not have enough stock for payment retry`,
-          400
-        );
-      }
-    }
-
-    await orderRepository.updateOrder(
-      order,
-      {
-        status: 'pending',
-        paymentStatus: 'pending',
-        stripePaymentIntentId: null,
-        stripeClientSecret: null,
-      },
-      { transaction }
-    );
-
-    return {
-      id: order.id,
-      totalAmount: order.totalAmount,
-      currency: order.currency,
-    };
-  });
-
-  let paymentIntent;
-
-  try {
-    paymentIntent = await stripeService.createPaymentIntent({
-      amount: toCents(retryOrder.totalAmount),
-      currency: retryOrder.currency,
-      orderId: retryOrder.id,
-      userId: user.id,
-      receiptEmail: user.email,
-      idempotencyKey: `order:${retryOrder.id}:retry:${Date.now()}`,
-    });
-
-    await sequelize.transaction(async (transaction) => {
-      const order = await orderRepository.findOrderById(retryOrder.id, {
-        transaction,
-      });
-
-      await orderRepository.updateOrder(
-        order,
-        {
-          stripePaymentIntentId: paymentIntent.id,
-          stripeClientSecret: paymentIntent.client_secret,
-        },
-        { transaction }
-      );
-    });
-
-    const order = await orderRepository.findOrderByIdForUser(
-      retryOrder.id,
-      user.id
-    );
-
-    return orderResponse(order);
-  } catch (error) {
-    if (paymentIntent?.id) {
-      try {
-        await stripeService.cancelPaymentIntent(paymentIntent.id);
-      } catch {
-        // Keep the original retry error; webhook handling will reconcile later.
-      }
-    }
-
-    await cancelReservedOrder(retryOrder.id, 'failed');
-    throw error;
-  }
-}
-
-export async function updateOrderStatus(orderId, status) {
-  await sequelize.transaction(async (transaction) => {
-    const order = await orderRepository.findOrderByIdForUpdate(orderId, {
-      transaction,
-      lock: true,
-    });
-
-    if (!order) {
-      throw new AppError('Order not found', 404);
-    }
-
-    if (order.status === 'cancelled') {
-      throw new AppError('Cancelled orders cannot be updated', 400);
-    }
-
-    if (status === 'cancelled') {
-      if (order.paymentProvider === 'stripe' && order.paymentStatus === 'succeeded') {
-        throw new AppError('Refund paid Stripe orders before cancelling', 400);
-      }
-
-      await restoreReservedStock(order, transaction);
-    }
-
-    await orderRepository.updateOrder(
-      order,
-      {
-        status,
-        ...(status === 'cancelled' && order.paymentStatus === 'pending'
-          ? { paymentStatus: 'cancelled' }
-          : {}),
-      },
-      { transaction }
-    );
-  });
-
-  const order = await orderRepository.findOrderById(orderId);
-
-  return orderResponse(order);
-}
-
-export async function updateCodPaymentStatus(orderId, paymentStatus) {
-  await sequelize.transaction(async (transaction) => {
-    const order = await orderRepository.findOrderByIdForUpdate(orderId, {
-      transaction,
-      lock: true,
-    });
-
-    if (!order) {
-      throw new AppError('Order not found', 404);
-    }
-
-    if (order.paymentProvider !== 'cod') {
-      throw new AppError('Only COD payment status can be updated manually', 400);
-    }
-
-    if (order.status === 'cancelled') {
-      throw new AppError('Cancelled orders cannot be updated', 400);
-    }
-
-    if (paymentStatus === 'succeeded') {
-      await orderRepository.updateOrder(
-        order,
-        {
-          paymentStatus,
-          status: order.status === 'pending' ? 'paid' : order.status,
-        },
-        { transaction }
-      );
-      return;
-    }
-
-    if (['failed', 'cancelled'].includes(paymentStatus)) {
-      await restoreReservedStock(order, transaction);
-      await orderRepository.updateOrder(
-        order,
-        {
-          paymentStatus,
-          status: 'cancelled',
-        },
-        { transaction }
-      );
-      return;
-    }
-
-    await orderRepository.updateOrder(order, { paymentStatus }, { transaction });
-  });
-
-  const order = await orderRepository.findOrderById(orderId);
+  const order = await getOrderForUserOrFail(userId, orderId);
 
   return orderResponse(order);
 }
 
 export async function cancelOrder(userId, orderId) {
-  const order = await orderRepository.findOrderByIdForUser(orderId, userId);
-
-  if (!order) {
-    throw new AppError('Order not found', 404);
-  }
-
-  if (order.status !== 'pending' || order.paymentStatus !== 'pending') {
-    throw new AppError('Only pending orders can be cancelled', 400);
-  }
-
-  if (order.stripePaymentIntentId) {
-    await stripeService.cancelPaymentIntent(order.stripePaymentIntentId);
-  }
-
-  await cancelReservedOrder(order.id, 'cancelled');
-
-  const cancelledOrder = await orderRepository.findOrderByIdForUser(
-    orderId,
-    userId
-  );
-
-  return orderResponse(cancelledOrder);
-}
-
-export async function handleStripeWebhook(rawBody, signature) {
-  const event = stripeService.constructWebhookEvent(rawBody, signature);
-  const paymentIntent = event.data.object;
-
-  if (event.type === 'payment_intent.succeeded') {
-    await markPaymentSucceeded(paymentIntent.id);
-  }
-
-  if (event.type === 'payment_intent.payment_failed') {
-    await markPaymentFailed(paymentIntent.id);
-  }
-
-  if (event.type === 'payment_intent.canceled') {
-    await markPaymentCancelled(paymentIntent.id);
-  }
-
-  return {
-    received: true,
-  };
-}
-
-async function markPaymentSucceeded(paymentIntentId) {
-  await sequelize.transaction(async (transaction) => {
-    const order = await orderRepository.findOrderByPaymentIntentId(
-      paymentIntentId,
-      { transaction }
-    );
-
-    if (
-      !order ||
-      order.status !== 'pending' ||
-      order.paymentStatus !== 'pending'
-    ) {
-      return;
-    }
-
-    await orderRepository.updateOrder(
-      order,
-      {
-        status: 'paid',
-        paymentStatus: 'succeeded',
-      },
-      { transaction }
-    );
-
-    const cart = await cartRepository.findOrCreateCartByUserId(order.userId, {
+  const order = await sequelize.transaction(async (transaction) => {
+    const existingOrder = await getOrderForUserOrFail(userId, orderId, {
       transaction,
     });
 
-    await cartRepository.clearCartItems(cart.id, { transaction });
+    if (existingOrder.status !== "pending" || existingOrder.paymentStatus !== "pending") {
+      throw new AppError("Only pending unpaid orders can be cancelled", 400);
+    }
+
+    return orderRepository.updateOrder(
+      existingOrder,
+      {
+        status: "cancelled",
+        paymentStatus: "cancelled",
+      },
+      { transaction }
+    );
   });
+
+  return orderResponse(order);
 }
 
-async function markPaymentFailed(paymentIntentId) {
-  const order = await orderRepository.findOrderByPaymentIntentId(paymentIntentId);
+export async function retryPayment(userId, orderId) {
+  const order = await sequelize.transaction(async (transaction) => {
+    const existingOrder = await getOrderForUserOrFail(userId, orderId, {
+      transaction,
+    });
 
-  if (!order || order.paymentStatus !== 'pending') {
-    return;
-  }
+    if (existingOrder.paymentProvider !== "stripe") {
+      throw new AppError("Only Stripe orders can retry payment", 400);
+    }
 
-  await cancelReservedOrder(order.id, 'failed');
+    if (!["failed", "cancelled"].includes(existingOrder.paymentStatus)) {
+      throw new AppError("Payment can only be retried after failure or cancellation", 400);
+    }
+
+    return orderRepository.updateOrder(
+      existingOrder,
+      {
+        paymentStatus: "pending",
+      },
+      { transaction }
+    );
+  });
+
+  return orderResponse(order);
 }
 
-async function markPaymentCancelled(paymentIntentId) {
-  const order = await orderRepository.findOrderByPaymentIntentId(paymentIntentId);
+export async function getAdminOrders(query = {}) {
+  const orders = await orderRepository.findAllOrders(query);
 
-  if (!order || order.paymentStatus !== 'pending') {
-    return;
-  }
+  return orders.map(orderResponse);
+}
 
-  await cancelReservedOrder(order.id, 'cancelled');
+export async function updateOrderStatus(orderId, status) {
+  const order = await sequelize.transaction(async (transaction) => {
+    const existingOrder = await getOrderOrFail(orderId, { transaction });
+
+    return orderRepository.updateOrder(existingOrder, { status }, { transaction });
+  });
+
+  return orderResponse(order);
+}
+
+export async function updatePaymentStatus(orderId, paymentStatus) {
+  const order = await sequelize.transaction(async (transaction) => {
+    const existingOrder = await getOrderOrFail(orderId, { transaction });
+
+    return orderRepository.updateOrder(
+      existingOrder,
+      { paymentStatus },
+      { transaction }
+    );
+  });
+
+  return orderResponse(order);
 }

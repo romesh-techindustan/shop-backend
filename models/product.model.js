@@ -44,12 +44,19 @@ const Product = sequelize.define("product", {
   },
   category: {
     type: DataTypes.ENUM(
-        "tshirt",
-        "shirt",
-        "jeans",
-        "jacket",
-        "shoes",
-        "accessories"
+      "electronics",
+      "fashion",
+      "home",
+      "beauty",
+      "automotive",
+      "sports",
+      "books",
+      "tshirt",
+      "shirt",
+      "jeans",
+      "jacket",
+      "shoes",
+      "accessories"
     ),
     allowNull: false,
     },

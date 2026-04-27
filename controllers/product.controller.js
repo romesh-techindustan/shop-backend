@@ -12,8 +12,15 @@ export async function getProductById(req, res) {
   res.success(product, 'Product retrieved successfully');
 }
 
-export async function getProductCategories(req, res){
-  const categories = await productService.getUniqueCategories();
+export async function getCategories(req, res) {
+  const categories = await productService.getCategories();
 
   res.success(categories, 'Categories retrieved successfully');
+}
+
+export async function getProductsByCategory(req, res){
+  const category = req.params.category;
+  const products = await productService.getProductsByCategory(category);
+
+  res.success(products, 'Get all products by category');
 }

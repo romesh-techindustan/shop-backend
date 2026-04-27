@@ -4,11 +4,16 @@ import authRoute from './routes/auth.route.js';
 import cartRoute from './routes/cart.route.js';
 import orderRoute from './routes/order.route.js';
 import productRoute from './routes/product.route.js';
-import * as orderController from './controllers/order.controller.js';
+import addressRoute from './routes/address.route.js';
+import orderRoute from './routes/order.route.js';
+import ratingRoute from './routes/rating.route.js';
+import stripeWebhookRoute from './routes/stripe-webhook.route.js';
+import wishlistRoute from './routes/wishlist.route.js';
 import successResponse from './middleware/success-response.js';
 import errorResponse from './middleware/error-response.js';
 import asyncHandler from './middleware/async-handler.js';
 import sequelize from './config/database.js';
+import syncDatabase from './config/sync-database.js';
 import cors from "cors";
 import dotenv from 'dotenv';
 import "./models/associations.js";
@@ -23,12 +28,7 @@ app.use(cors({
   credentials: true,
 }));
 
-app.post(
-  '/webhooks/stripe',
-  express.raw({ type: 'application/json' }),
-  asyncHandler(orderController.stripeWebhook)
-);
-
+app.use(stripeWebhookRoute);
 app.use(express.json());
 app.use(successResponse);
 app.use('/uploads', express.static('uploads'));
@@ -37,7 +37,10 @@ app.use('/users', userRoute);
 app.use('/auth', authRoute);
 app.use('/products', productRoute);
 app.use('/cart', cartRoute);
+app.use('/addresses', addressRoute);
 app.use('/orders', orderRoute);
+app.use('/ratings', ratingRoute);
+app.use('/wishlist', wishlistRoute);
 
 app.get('/', (req, res) => {
   res.send('Hello World!');
@@ -49,7 +52,7 @@ async function startServer() {
   try {
     await sequelize.authenticate();
 
-    await sequelize.sync();
+    await syncDatabase();
 
     app.listen(port, () => {
       console.log(`Server is running on port ${port}`);

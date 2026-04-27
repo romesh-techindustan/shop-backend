@@ -80,45 +80,21 @@ export async function getProductsByCategory(category) {
   });
 }
 
-export async function reserveProductStock(productId, quantity, options = {}) {
-  const [affectedCount] = await Product.update(
-    {
-      stock: sequelize.literal(`stock - ${Number(quantity)}`),
-    },
-    {
-      where: {
-        id: productId,
-        stock: {
-          [Op.gte]: quantity,
-        },
-      },
-      transaction: options.transaction,
-    }
-  );
-
-  return affectedCount > 0;
-}
-
-export async function restoreProductStock(productId, quantity, options = {}) {
-  return Product.increment('stock', {
-    by: quantity,
-    where: {
-      id: productId,
-    },
-    transaction: options.transaction,
-  });
-}
-
-export async function getUniqueCategories() {
-  const categories = await Product.findAll({
+export async function getDistinctCategories() {
+  const rows = await Product.findAll({
     attributes: ['category'],
-    where: {
-      isActive: true,
-    },
     group: ['category'],
-    order: [['category', 'ASC']],
     raw: true,
+    order: [['category', 'ASC']],
   });
 
-  return categories.map((item) => item.category);
+  const distinctCategories = rows
+    .map((row) => row.category)
+    .filter(Boolean);
+
+  if (distinctCategories.length > 0) {
+    return distinctCategories;
+  }
+
+  return Product.rawAttributes.category.values ?? [];
 }

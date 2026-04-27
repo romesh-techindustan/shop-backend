@@ -1,8 +1,9 @@
 import { AppError } from './error-response.js';
+import { isAdminUser } from '../utils/admin.js';
 
 export default function authorizeAdmin(req, res, next) {
-  if (req.user?.isAdmin !== true) {
-    return next(new AppError('Admin access is required', 403));
+  if (!isAdminUser(req.user)) {
+    return next(new AppError('Admin access required', 403));
   }
 
   next();

@@ -1,7 +1,5 @@
-import { productResponse } from './product-response.dto.js';
-
 function asPlainRecord(model) {
-  if (model && typeof model.get === 'function') {
+  if (model && typeof model.get === "function") {
     return model.get({ plain: true });
   }
 
@@ -14,19 +12,21 @@ function toMoneyNumber(value) {
 
 function orderItemResponse(itemModel) {
   const item = asPlainRecord(itemModel);
+  const quantity = Number(item.quantity ?? 0);
+  const unitPrice = toMoneyNumber(item.unitPrice);
 
   return {
     id: item.id,
+    orderId: item.orderId,
     productId: item.productId,
     productName: item.productName,
     productSku: item.productSku,
     productImage: item.productImage,
-    quantity: Number(item.quantity ?? 0),
     selectedColor: item.selectedColor,
     selectedSize: item.selectedSize,
-    unitPrice: toMoneyNumber(item.unitPrice),
-    lineTotal: toMoneyNumber(item.lineTotal),
-    product: productResponse(item.product),
+    quantity,
+    unitPrice,
+    lineTotal: toMoneyNumber(item.lineTotal ?? unitPrice * quantity),
     createdAt: item.createdAt,
     updatedAt: item.updatedAt,
   };
@@ -34,22 +34,31 @@ function orderItemResponse(itemModel) {
 
 export function orderResponse(orderModel) {
   const order = asPlainRecord(orderModel);
-  const items = (order.items ?? []).map(orderItemResponse);
+
+  if (!order) {
+    return null;
+  }
 
   return {
     id: order.id,
+    orderNumber: order.orderNumber,
     userId: order.userId,
+    addressId: order.addressId,
     status: order.status,
     paymentStatus: order.paymentStatus,
-    paymentMethod: order.paymentProvider,
+    paymentMethod: order.paymentMethod,
     paymentProvider: order.paymentProvider,
-    subtotal: toMoneyNumber(order.subtotal),
-    totalAmount: toMoneyNumber(order.totalAmount),
-    currency: order.currency,
-    shippingAddress: order.shippingAddress,
+    stripeCheckoutSessionId: order.stripeCheckoutSessionId,
     stripePaymentIntentId: order.stripePaymentIntentId,
-    clientSecret: order.stripeClientSecret,
-    items,
+    currency: order.currency,
+    subtotal: toMoneyNumber(order.subtotal),
+    shippingAmount: toMoneyNumber(order.shippingAmount),
+    taxAmount: toMoneyNumber(order.taxAmount),
+    discountAmount: toMoneyNumber(order.discountAmount),
+    totalAmount: toMoneyNumber(order.totalAmount),
+    shippingAddress: order.shippingAddress,
+    items: (order.items ?? []).map(orderItemResponse),
+    placedAt: order.placedAt,
     createdAt: order.createdAt,
     updatedAt: order.updatedAt,
   };
