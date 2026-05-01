@@ -1,6 +1,5 @@
 import { Op } from 'sequelize';
 import { AppError } from '../middleware/error-response.js';
-import sequelize from '../config/database.js';
 import Product from '../models/product.model.js';
 
 export async function createProduct(data) {
